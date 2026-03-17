@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Optimized Air Draw</title>
+
+  <style>
+    body { margin: 0; overflow: hidden; background: black; }
+    video { display: none; }
+    canvas { position: absolute; top: 0; left: 0; }
+    #eraseBtn {
+      position: absolute;
+      top: 20px;
+      right: 20px;
+      z-index: 20;
+      padding: 12px 20px;
+      font-size: 16px;
+      border-radius: 10px;
+      border: none;
+      background: #ff007f;
+      color: white;
+      cursor: pointer;
+    }
+  </style>
+
+  <!-- MediaPipe Hands -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+  <!-- Camera Utils -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+  <!-- Drawing Utils -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+</head>
+
+<body>
+
+<button id="eraseBtn">Erase</button>
+
+<video id="video" playsinline></video>
+
+<canvas id="output"></canvas>      
+<canvas id="draw"></canvas>        
+
+<script>
+
+const video = document.getElementById("video");
+const output = document.getElementById("output");
+const drawCanvas = document.getElementById("draw");
+
+const octx = output.getContext("2d");
+const dctx = drawCanvas.getContext("2d");
+
+function resize() {
+  output.width = drawCanvas.width = window.innerWidth;
+  output.height = drawCanvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener("resize", resize);
+
+
+// ==== STATE ====
+let prevX = null;
+let prevY = null;
+
+
+// ==== MEDIAPIPE SETUP ====
+const hands = new Hands({
+  locateFile: file => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+});
+
+hands.setOptions({
+  maxNumHands: 1,
+  minDetectionConfidence: 0.7,
+  minTrackingConfidence: 0.7,
+  modelComplexity: 0   
+});
+
+
+// ===== PROCESS HAND RESULTS =====
+hands.onResults(results => {
+  
+  // Draw webcam feed
+  octx.drawImage(video, 0, 0, output.width, output.height);
+
+  // If no hand → stop drawing
+  if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) {
+    prevX = prevY = null;
+    return;
+  }
+
+  const hand = results.multiHandLandmarks[0];
+
+  
+  drawConnectors(octx, hand, HAND_CONNECTIONS, { color: "#00FF00", lineWidth: 3 });
+  drawLandmarks(octx, hand, { color: "#FF0000", radius: 5 });
+
+
+  const tip = hand[8];
+  const x = tip.x * output.width;
+  const y = tip.y * output.height;
+
+  if (prevX !== null && prevY !== null) {
+    dctx.strokeStyle = "#FF00FF";
+    dctx.lineWidth = 8;
+    dctx.lineCap = "round";
+    dctx.beginPath();
+    dctx.moveTo(prevX, prevY);
+    dctx.lineTo(x, y);
+    dctx.stroke();
+  }
+
+  prevX = x;
+  prevY = y;
+});
+
+
+
+const camera = new Camera(video, {
+  onFrame: async () => {
+
+    const small = document.createElement("canvas");
+    small.width = 320;
+    small.height = 240;
+
+    small.getContext("2d").drawImage(video, 0, 0, 320, 240);
+
+    await hands.send({ image: small });
+  },
+  width: 640,      
+  height: 480
+});
+
+camera.start();
+
+
+document.getElementById("eraseBtn").onclick = () => {
+  dctx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+};
+
+</script>
+
+</body>
+</html>
