@@ -1,17 +1,17 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Optimized Air Draw</title>
+  <title>Air Draw — 5 Fingers + Thumb Press</title>
 
   <style>
-    body { margin: 0; overflow: hidden; background: black; }
+    body { margin: 0; overflow: hidden; background: black; font-family: system-ui, sans-serif; }
     video { display: none; }
     canvas { position: absolute; top: 0; left: 0; }
     #eraseBtn {
       position: absolute;
       top: 20px;
       right: 20px;
-      z-index: 20;
+      z-index: 25;
       padding: 12px 20px;
       font-size: 16px;
       border-radius: 10px;
@@ -19,7 +19,60 @@
       background: #ff007f;
       color: white;
       cursor: pointer;
+      font-weight: 600;
     }
+    #fingerStrip {
+      position: absolute;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 25;
+      display: flex;
+      gap: 8px;
+      padding: 10px 14px;
+      background: rgba(0,0,0,0.75);
+      border-radius: 16px;
+      border: 2px solid rgba(255,255,255,0.2);
+      backdrop-filter: blur(8px);
+    }
+    .fingerBtn {
+      width: 52px;
+      height: 52px;
+      border-radius: 50%;
+      border: 3px solid rgba(255,255,255,0.4);
+      background: rgba(80,80,80,0.9);
+      color: #fff;
+      font-size: 11px;
+      font-weight: 700;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      line-height: 1.1;
+      transition: transform 0.1s, border-color 0.15s, background 0.15s;
+    }
+    .fingerBtn:hover { transform: scale(1.05); border-color: rgba(255,255,255,0.8); }
+    .fingerBtn.active {
+      border-color: #00ff88;
+      background: rgba(0,255,136,0.35);
+      box-shadow: 0 0 16px rgba(0,255,136,0.5);
+    }
+    .fingerBtn.hover {
+      border-color: #ffcc00;
+      background: rgba(255,204,0,0.25);
+    }
+    #hint {
+      position: absolute;
+      top: 20px;
+      left: 20px;
+      z-index: 25;
+      color: rgba(255,255,255,0.9);
+      font-size: 13px;
+      max-width: 280px;
+      text-shadow: 0 1px 3px rgba(0,0,0,0.8);
+    }
+    #hint strong { color: #00ff88; }
   </style>
 
   <!-- MediaPipe Hands -->
@@ -32,12 +85,20 @@
 
 <body>
 
+<p id="hint"><strong>Draw:</strong> Thumb pressed in = drawing on. Thumb out = stop. <strong>Choose finger:</strong> Point that finger at its button below and press thumb to select.</p>
 <button id="eraseBtn">Erase</button>
+<div id="fingerStrip">
+  <button type="button" class="fingerBtn" data-finger="thumb" title="Thumb">Thumb</button>
+  <button type="button" class="fingerBtn" data-finger="index" title="Index">Index</button>
+  <button type="button" class="fingerBtn" data-finger="middle" title="Middle">Middle</button>
+  <button type="button" class="fingerBtn" data-finger="ring" title="Ring">Ring</button>
+  <button type="button" class="fingerBtn" data-finger="pinky" title="Pinky">Pinky</button>
+</div>
 
 <video id="video" playsinline></video>
 
 <canvas id="output"></canvas>      
-<canvas id="draw"></canvas>        
+<canvas id="draw"></canvas>       
 
 <script>
 
@@ -48,6 +109,19 @@ const drawCanvas = document.getElementById("draw");
 const octx = output.getContext("2d");
 const dctx = drawCanvas.getContext("2d");
 
+// MediaPipe hand landmark indices for fingertips
+const FINGER_TIP_INDEX = { thumb: 4, index: 8, middle: 12, ring: 16, pinky: 20 };
+const FINGER_NAMES = ["thumb", "index", "middle", "ring", "pinky"];
+
+// Which finger is used for drawing 
+let activeFinger = "index";
+// Only draw when thumb is "pressed in" 
+const THUMB_PRESS_THRESHOLD = 0.22;
+let prevX = null;
+let prevY = null;
+let lastSelectTime = 0;
+const SELECT_DEBOUNCE_MS = 400;
+
 function resize() {
   output.width = drawCanvas.width = window.innerWidth;
   output.height = drawCanvas.height = window.innerHeight;
@@ -55,13 +129,57 @@ function resize() {
 resize();
 window.addEventListener("resize", resize);
 
+function dist(a, b) {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
 
-// ==== STATE ====
-let prevX = null;
-let prevY = null;
+function isThumbPressed(hand) {
+  const thumbTip = hand[4];
+  const wrist = hand[0];
+  const d = dist(thumbTip, wrist);
+  return d < THUMB_PRESS_THRESHOLD;
+}
+
+function getFingerTip(hand, fingerName) {
+  const i = FINGER_TIP_INDEX[fingerName];
+  return hand[i];
+}
+
+// Get screen bounds of each finger button 
+function getButtonBounds() {
+  const strip = document.getElementById("fingerStrip");
+  const rects = {};
+  FINGER_NAMES.forEach(name => {
+    const el = strip.querySelector(`[data-finger="${name}"]`);
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    rects[name] = { x: r.left, y: r.top, w: r.width, h: r.height };
+  });
+  return rects;
+}
+
+function isPointInRect(x, y, r) {
+  return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
+}
+
+// Update which button looks active / hovered
+function updateButtonStates(hand, bounds) {
+  if (!hand || !bounds) return;
+  FINGER_NAMES.forEach(name => {
+    const tip = getFingerTip(hand, name);
+    const sx = tip.x * window.innerWidth;
+    const sy = tip.y * window.innerHeight;
+    const r = bounds[name];
+    if (!r) return;
+    const el = document.querySelector(`[data-finger="${name}"]`);
+    if (!el) return;
+    const inside = isPointInRect(sx, sy, r);
+    el.classList.toggle("active", name === activeFinger);
+    el.classList.toggle("hover", inside && name !== activeFinger);
+  });
+}
 
 
-// ==== MEDIAPIPE SETUP ====
 const hands = new Hands({
   locateFile: file => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
 });
@@ -70,70 +188,101 @@ hands.setOptions({
   maxNumHands: 1,
   minDetectionConfidence: 0.7,
   minTrackingConfidence: 0.7,
-  modelComplexity: 0   
+  modelComplexity: 0
 });
 
 
-// ===== PROCESS HAND RESULTS =====
 hands.onResults(results => {
-  
-  // Draw webcam feed
-  octx.drawImage(video, 0, 0, output.width, output.height);
+  const frame = results.image || video;
+  if (frame && frame.width && frame.height) {
+    octx.drawImage(frame, 0, 0, output.width, output.height);
+  } else {
+    octx.drawImage(video, 0, 0, output.width, output.height);
+  }
 
-  // If no hand → stop drawing
   if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) {
     prevX = prevY = null;
     return;
   }
 
   const hand = results.multiHandLandmarks[0];
+  const thumbPressed = isThumbPressed(hand);
 
-  
-  drawConnectors(octx, hand, HAND_CONNECTIONS, { color: "#00FF00", lineWidth: 3 });
-  drawLandmarks(octx, hand, { color: "#FF0000", radius: 5 });
+  if (typeof HAND_CONNECTIONS !== "undefined" && typeof drawConnectors === "function" && typeof drawLandmarks === "function") {
+    drawConnectors(octx, hand, HAND_CONNECTIONS, { color: "#00FF00", lineWidth: 3 });
+    drawLandmarks(octx, hand, { color: "#FF0000", radius: 5 });
+    // Highlight active drawing fingertip
+    const activeTip = getFingerTip(hand, activeFinger);
+    octx.beginPath();
+    octx.arc(activeTip.x * output.width, activeTip.y * output.height, 14, 0, Math.PI * 2);
+    octx.strokeStyle = "#00ff88";
+    octx.lineWidth = 4;
+    octx.stroke();
+    octx.fillStyle = "rgba(0,255,136,0.4)";
+    octx.fill();
+  }
 
+  const bounds = getButtonBounds();
+  updateButtonStates(hand, bounds);
 
-  const tip = hand[8];
+  // Virtual click: if thumb is pressed and a fingertip is over its button, select that finger
+  const now = Date.now();
+  if (thumbPressed && now - lastSelectTime > SELECT_DEBOUNCE_MS) {
+    FINGER_NAMES.forEach(name => {
+      const tip = getFingerTip(hand, name);
+      const sx = tip.x * window.innerWidth;
+      const sy = tip.y * window.innerHeight;
+      const r = bounds[name];
+      if (r && isPointInRect(sx, sy, r)) {
+        activeFinger = name;
+        lastSelectTime = now;
+      }
+    });
+  }
+
+  const tip = getFingerTip(hand, activeFinger);
   const x = tip.x * output.width;
   const y = tip.y * output.height;
 
-  if (prevX !== null && prevY !== null) {
-    dctx.strokeStyle = "#FF00FF";
-    dctx.lineWidth = 8;
-    dctx.lineCap = "round";
-    dctx.beginPath();
-    dctx.moveTo(prevX, prevY);
-    dctx.lineTo(x, y);
-    dctx.stroke();
+  if (thumbPressed) {
+    if (prevX !== null && prevY !== null) {
+      dctx.strokeStyle = "#FF00FF";
+      dctx.lineWidth = 8;
+      dctx.lineCap = "round";
+      dctx.beginPath();
+      dctx.moveTo(prevX, prevY);
+      dctx.lineTo(x, y);
+      dctx.stroke();
+    }
+    prevX = x;
+    prevY = y;
+  } else {
+    prevX = prevY = null;
   }
-
-  prevX = x;
-  prevY = y;
 });
-
-
 
 const camera = new Camera(video, {
-  onFrame: async () => {
-
-    const small = document.createElement("canvas");
-    small.width = 320;
-    small.height = 240;
-
-    small.getContext("2d").drawImage(video, 0, 0, 320, 240);
-
-    await hands.send({ image: small });
-  },
-  width: 640,      
+  onFrame: async () => { await hands.send({ image: video }); },
+  width: 640,
   height: 480
 });
-
 camera.start();
-
 
 document.getElementById("eraseBtn").onclick = () => {
   dctx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
 };
+
+// Set initial active button
+document.querySelector(`[data-finger="${activeFinger}"]`)?.classList.add("active");
+
+// Mouse click on buttons also selects finger
+document.querySelectorAll(".fingerBtn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    activeFinger = btn.getAttribute("data-finger");
+    document.querySelectorAll(".fingerBtn").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+  });
+});
 
 </script>
 
